@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS moz_extension_data (
     */
     guid TEXT PRIMARY KEY,
     /* The JSON payload. not null because we prefer to delete the row than null it */
-    data LONGVARCHAR NOT NULL,
+    data TEXT NOT NULL,
 
     /* Same "sync status" strategy used by other components. */
     syncStatus INTEGER NOT NULL DEFAULT 0,

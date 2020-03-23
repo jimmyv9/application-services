@@ -9,9 +9,6 @@ use interrupt::Interrupted;
 // FFI, update `get_code` in `ffi.rs`
 #[derive(Debug, Fail)]
 pub enum ErrorKind {
-    #[fail(display = "Error synchronizing: {}", _0)]
-    SyncAdapterError(#[fail(cause)] sync15::Error),
-
     #[fail(display = "Error parsing JSON data: {}", _0)]
     JsonError(#[fail(cause)] serde_json::Error),
 
@@ -51,7 +48,6 @@ pub enum ErrorKind {
 
 error_support::define_error! {
     ErrorKind {
-        (SyncAdapterError, sync15::Error),
         (JsonError, serde_json::Error),
         (SqlError, rusqlite::Error),
         (IoError, std::io::Error),
