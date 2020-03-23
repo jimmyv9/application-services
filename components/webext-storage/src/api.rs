@@ -9,6 +9,12 @@ use serde_json::{Map, Value as JsonValue};
 use sql_support::{self, ConnExt};
 use std::collections::HashMap;
 
+const QUOTA_BYTES: usize = 102_400;
+const QUOTA_BYTES_PER_ITEM: usize = 8_192;
+const MAX_ITEMS: usize = 512;
+// Note there are constants for "operations per minute" etc, which aren't
+// enforced here.
+
 type JsonMap = Map<String, JsonValue>;
 
 fn get_from_db(conn: &StorageConn, ext_guid: &str) -> Result<Option<JsonMap>> {
@@ -31,11 +37,20 @@ fn get_from_db(conn: &StorageConn, ext_guid: &str) -> Result<Option<JsonMap>> {
 }
 
 fn save_to_db(conn: &StorageConn, ext_guid: &str, val: &JsonValue) -> Result<()> {
+    // Convert to bytes so we can enforce the quota.
+    let sval = val.to_string();
+    let bytes: Vec<u8> = sval.bytes().collect();
+    if bytes.len() > QUOTA_BYTES {
+        return Err(ErrorKind::QuotaError(QuotaReason::TotalBytes).into());
+    }
+    // XXX - work out how to get use these bytes directly instead of sval, so
+    // we don't utf-8 encode twice!
+
     // XXX - sync support will need to do the syncStatus thing here.
     conn.execute_named(
         "INSERT OR REPLACE INTO moz_extension_data(guid, data)
             VALUES (:guid, :data)",
-        &[(":guid", &ext_guid), (":data", &val.to_string())],
+        &[(":guid", &ext_guid), (":data", &sval)],
     )?;
     Ok(())
 }
@@ -61,11 +76,6 @@ pub struct StorageValueChange {
 
 pub type StorageChanges = HashMap<String, StorageValueChange>;
 
-// XXX - TODO - enforce quotas!
-// XXX - the shape of StorageChange is wrong! Instead of, say:
-//  {oldValue: {foo: "old"}, newValue: {foo: "new"}}
-// it should be:
-//  {foo: {oldValue: "old", newValue: "new"}}
 pub fn set(conn: &StorageConn, ext_guid: &str, val: JsonValue) -> Result<StorageChanges> {
     // XXX - Should we consider making this function  take a &str, and parse
     // it ourselves? That way we could avoid parsing entirely if no existing
@@ -84,6 +94,15 @@ pub fn set(conn: &StorageConn, ext_guid: &str, val: JsonValue) -> Result<Storage
     // iterate over the value we are adding/updating.
     for (k, v) in val_map.into_iter() {
         let old_value = current.remove(&k);
+        if current.len() >= MAX_ITEMS {
+            return Err(ErrorKind::QuotaError(QuotaReason::MaxItems).into());
+        }
+        // Sadly we need to stringify the value here just to check the quota.
+        // Reading the chrome docs literally, the length of the key is just
+        // the string len, but the value is the json val.
+        if k.bytes().count() + v.to_string().bytes().count() >= QUOTA_BYTES_PER_ITEM {
+            return Err(ErrorKind::QuotaError(QuotaReason::ItemBytes).into());
+        }
         current.insert(k.clone(), v.clone());
         let change = StorageValueChange {
             old_value,
@@ -347,6 +366,45 @@ mod tests {
             set(&conn, &ext_id, json!({"foo": "bar" }))?,
             make_changes(&[("foo", Some(json!("bar")), Some(json!("bar")))]),
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_quota_maxitems() -> Result<()> {
+        let conn = new_mem_connection();
+        let ext_id = "xyz";
+        for i in 1..MAX_ITEMS + 1 {
+            set(
+                &conn,
+                &ext_id,
+                json!({ format!("key-{}", i): format!("value-{}", i) }),
+            )?;
+        }
+        let e = set(&conn, &ext_id, json!({"another": "another"})).unwrap_err();
+        match e.kind() {
+            ErrorKind::QuotaError(QuotaReason::MaxItems) => {}
+            _ => panic!("unexpected error type"),
+        };
+        Ok(())
+    }
+
+    #[test]
+    fn test_quota_bytesperitem() -> Result<()> {
+        let conn = new_mem_connection();
+        let ext_id = "xyz";
+        // A string 5 bytes less than the max. This should be counted as being
+        // 3 bytes less than the max as the quotes are counted.
+        let val = "x".repeat(QUOTA_BYTES_PER_ITEM - 5);
+
+        // Key length doesn't push it over.
+        set(&conn, &ext_id, json!({ "x": val }))?;
+
+        // Key length does push it over.
+        let e = set(&conn, &ext_id, json!({ "xxxx": val })).unwrap_err();
+        match e.kind() {
+            ErrorKind::QuotaError(QuotaReason::ItemBytes) => {}
+            _ => panic!("unexpected error type"),
+        };
         Ok(())
     }
 }

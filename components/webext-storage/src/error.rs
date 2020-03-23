@@ -5,10 +5,20 @@
 use failure::Fail;
 use interrupt::Interrupted;
 
+#[derive(Debug)]
+pub enum QuotaReason {
+    TotalBytes,
+    ItemBytes,
+    MaxItems,
+}
+
 // Note: If you add new error types that should be returned to consumers on the other side of the
 // FFI, update `get_code` in `ffi.rs`
 #[derive(Debug, Fail)]
 pub enum ErrorKind {
+    #[fail(display = "Quota exceeded: {:?}", _0)]
+    QuotaError(QuotaReason),
+
     #[fail(display = "Error parsing JSON data: {}", _0)]
     JsonError(#[fail(cause)] serde_json::Error),
 
